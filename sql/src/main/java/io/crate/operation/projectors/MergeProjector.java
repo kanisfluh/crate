@@ -29,9 +29,10 @@ import io.crate.operation.RowDownstream;
 import io.crate.operation.RowDownstreamHandle;
 import io.crate.operation.RowUpstream;
 import io.crate.operation.projectors.sorting.OrderingByPosition;
-import org.elasticsearch.common.Nullable;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -42,9 +43,8 @@ public class MergeProjector implements Projector  {
     private final List<RowUpstream> upstreams = new ArrayList<>();
     private final AtomicInteger remainingUpstreams = new AtomicInteger(0);
     private final AtomicBoolean downstreamAborted = new AtomicBoolean(false);
+    private final LowestCommon lowestCommon = new LowestCommon();
     private RowDownstreamHandle downstreamContext;
-    private Row lowestToEmit = null;
-    private final Object lowestToEmitLock = new Object();
 
 
     public MergeProjector(int[] orderBy,
@@ -68,8 +68,9 @@ public class MergeProjector implements Projector  {
     public RowDownstreamHandle registerUpstream(RowUpstream upstream) {
         upstreams.add(upstream);
         remainingUpstreams.incrementAndGet();
-        MergeProjectorDownstreamHandle handle = new MergeProjectorDownstreamHandle(this);
+        MergeProjectorDownstreamHandle handle = new MergeProjectorDownstreamHandle(this, upstream);
         downstreamHandles.add(handle);
+        lowestCommon.unexhaustedHandles.incrementAndGet();
         return handle;
     }
 
@@ -79,7 +80,6 @@ public class MergeProjector implements Projector  {
     }
 
     public void upstreamFinished() {
-        emit();
         if (remainingUpstreams.decrementAndGet() <= 0) {
             if (downstreamContext != null) {
                 downstreamContext.finish();
@@ -87,7 +87,7 @@ public class MergeProjector implements Projector  {
         }
     }
 
-    public void upstreamFailed(Throwable throwable) {
+    protected void upstreamFailed(Throwable throwable) {
         downstreamAborted.compareAndSet(false, true);
         if (remainingUpstreams.decrementAndGet() == 0) {
             if (downstreamContext != null) {
@@ -96,150 +96,79 @@ public class MergeProjector implements Projector  {
         }
     }
 
-    public boolean emit() {
-        Row lowestToEmit;
-        synchronized (lowestToEmitLock) {
-            lowestToEmit = this.lowestToEmit;
-        }
-        if (lowestToEmit == null) {
-            lowestToEmit = findLowestRow();
-        }
-
-        while (lowestToEmit != null) {
-            Row nextLowest = null;
-            boolean emptyHandle = false;
-            for (MergeProjectorDownstreamHandle handle : downstreamHandles) {
-                if (!handle.emitUntil(lowestToEmit)) {
-                    downstreamAborted.set(true);
-                    return false;
-                }
-                Row row = handle.firstRow();
-                if (row == null) {
-                    if (!handle.isFinished()) {
-                        emptyHandle = true;
-                    }
-                    continue;
-                }
-
-                if (nextLowest == null || ordering.compare(row, nextLowest) > 0) {
-                    nextLowest = row;
-                }
-            }
-            // If there is one empty handle everything which can be emitted is emitted
-            if (emptyHandle) {
-                break;
-            } else {
-                lowestToEmit = nextLowest;
-            }
-        }
-        synchronized (lowestToEmitLock) {
-            this.lowestToEmit = lowestToEmit;
-        }
-        return true;
-    }
-
-    @Nullable
-    private Row findLowestRow() {
-        Row lowest = null;
-        for (MergeProjectorDownstreamHandle handle : downstreamHandles ) {
-            Row row = handle.firstRow();
-            if (row == null) {
-                if (!handle.isFinished()) {
-                    return null; // There is an empty downstreamHandle, abort
-                }
-                continue;
-            }
-
-            if (lowest == null) {
-                lowest = row;
-            } else if (ordering.compare(row, lowest) > 0) {
-                lowest = row;
-            }
-        }
-        return lowest;
-    }
-
     @Override
     public void pause() {
-        for (RowUpstream upstream : upstreams) {
-            upstream.pause();
+        for (MergeProjectorDownstreamHandle handle : downstreamHandles) {
+            if (!handle.isFinished()) {
+                handle.upstream.pause();
+            }
         }
     }
 
     @Override
     public void resume(boolean async) {
-        for (RowUpstream upstream : upstreams) {
-            upstream.resume(async);
+        for (MergeProjectorDownstreamHandle handle : downstreamHandles) {
+            if (!handle.isFinished() && !handle.paused.get()) {
+                handle.upstream.resume(async);
+            }
         }
     }
 
     public class MergeProjectorDownstreamHandle implements RowDownstreamHandle {
 
         private final MergeProjector projector;
-        private final Object lock = new Object();
+        private final RowUpstream upstream;
         private AtomicBoolean finished = new AtomicBoolean(false);
-        private Row firstRow = null;
+        private Row row = null;
 
-        private ArrayDeque<Row> rows = new ArrayDeque<>();
-
-        public MergeProjectorDownstreamHandle(MergeProjector projector) {
+        public MergeProjectorDownstreamHandle(MergeProjector projector, RowUpstream upstream) {
+            this.upstream = upstream;
             this.projector = projector;
         }
 
-        public Row firstRow() throws NoSuchElementException {
-            synchronized (lock) {
-                return firstRow;
+        @Override
+        public boolean setNextRow(Row row) {
+            row = new RowN(row.materialize());
+            if (projector.downstreamAborted.get()) {
+                return false;
             }
-        }
-
-        public Row poll() {
-            synchronized (lock) {
-                Row row = rows.poll();
-                if (rows.size() == 0) {
-                    firstRow = null;
-                } else {
-                    firstRow = rows.getFirst();
-                }
-                return row;
+            if (this.row != null) {
+                emitNextRow(this.row);
             }
-        }
-
-        public boolean emitUntil(Row until) {
-            synchronized (lock) {
-                while (firstRow != null && ordering.compare(firstRow, until) >= 0) {
-                    if (!downstreamContext.setNextRow(poll())) {
-                        return false;
+            if (lowestCommon.isEmittable(row)) {
+                // emit
+                return emitNextRow(row);
+            } else {
+                this.row = row;
+                pendingPause.set(true);
+                if (lowestCommon.raiseLowest(row, this)) {
+                    boolean resume = true;
+                    if (lowestCommon.isEmittable(row)) {
+                        // this row can be emitted, so no need to pause anymore
+                        resume = emitNextRow(row);
+                        pendingPause.set(false);
+                        lowestCommon.resumed();
+                    } else {
+                        // lowest row raised, but this row can't still be emitted, so pause
+                        pause();
                     }
+                    lowestRaised();
+                    return resume;
+                } else {
+                    pause();
                 }
             }
             return true;
         }
 
-        @Override
-        public boolean setNextRow(Row row) {
-            if (projector.downstreamAborted.get()) {
-                return false;
-            }
-            row = new RowN(row.materialize());
-            int size;
-            synchronized (lock) {
-                rows.add(row);
-                size = rows.size();
-                if (firstRow == null) {
-                    firstRow = row;
-                }
-            }
-            // Only try to emit if this handler was empty before
-            // else we know that there must be a handler with a lower highest value than this.
-            return size != 1 || projector.emit();
+        private boolean emitNextRow(Row row) {
+            boolean resume = downstreamContext.setNextRow(row);
+            this.row = null;
+            return resume;
         }
 
-        @Override
-        public void finish() {
-            if (finished.compareAndSet(false, true)) {
-                projector.upstreamFinished();
-            }
-        }
+        private AtomicBoolean pendingPause = new AtomicBoolean(false);
+
 
         public boolean isFinished() {
             return finished.get();
@@ -248,6 +177,130 @@ public class MergeProjector implements Projector  {
         @Override
         public void fail(Throwable throwable) {
             projector.upstreamFailed(throwable);
+        }
+
+        private AtomicBoolean paused = new AtomicBoolean(false);
+
+        private void pause() {
+            if (pendingPause.get()) {
+                upstream.pause();
+                paused.set(true);
+                if (!pendingPause.get()) {
+                    // This handle was resumed while pausing, so continue here
+                    paused.set(false);
+                    lowestCommon.resumed();
+                    upstream.resume(true);
+                }
+                pendingPause.set(false);
+            } else {
+                lowestCommon.resumed();
+            }
+        }
+
+        @Override
+        public synchronized void finish() {
+            if (finished.compareAndSet(false, true) && !paused.get()) {
+                // it's not necessary to check pendingPause, because finish() and pause() will never be called in parallel
+                if (this.row != null) {
+                    // finished was called after resume - this is not a problem we just have to emit and go on :)
+                    emitNextRow(this.row);
+                }
+                if(lowestCommon.finished(this)){
+                    lowestRaised();
+                }
+                projector.upstreamFinished();
+            }
+        }
+
+        private synchronized void resume() {
+            if (!pendingPause.getAndSet(false) && paused.compareAndSet(true, false)) {
+                if (finished.get()) {
+                    // The upstream is already finished, so emit the last row and finish
+                    emitNextRow(this.row);
+                    lowestCommon.resumed();
+                    if (lowestCommon.finished(this)) {
+                        lowestRaised();
+                    }
+                    projector.upstreamFinished();
+                } else {
+                    lowestCommon.resumed();
+                    upstream.resume(true);
+                }
+            }
+        }
+
+        protected void tryResume() {
+            if (lowestCommon.isEmittable(row)) {
+                resume();
+            }
+        }
+
+        public void lowestRaised() {
+            for (MergeProjectorDownstreamHandle h : downstreamHandles) {
+                if (h != this && h.row != null) {
+                    h.tryResume();
+                }
+            }
+        }
+
+    }
+
+    private class LowestCommon {
+
+        private final AtomicInteger unexhaustedHandles = new AtomicInteger(0);
+        private Row lowestToEmit = null;
+
+        public boolean raiseLowest(Row row, MergeProjectorDownstreamHandle handle) {
+            if (unexhaustedHandles.decrementAndGet() == 0) {
+                // every handle is exhausted, so the LowestCommonRow must be raised
+                lowestToEmit = row;
+                for (MergeProjectorDownstreamHandle h : downstreamHandles) {
+                    // h.row == null when finished
+                    if (h != handle && h.row != null && ordering.compare(h.row, lowestToEmit) > 0) {
+                        lowestToEmit = h.row;
+                    }
+                }
+                return true;
+            }
+            return false;
+        }
+
+        public boolean finished(MergeProjectorDownstreamHandle handle) {
+            if (unexhaustedHandles.decrementAndGet() == 0) {
+                Row nextLowest = null;
+                for (MergeProjectorDownstreamHandle h : downstreamHandles) {
+                    if (h == handle) {
+                        continue;
+                    }
+                    if ((h.paused.get() || h.pendingPause.get()) || (h.row == null && h.isFinished())) {
+                        if (nextLowest == null) {
+                            nextLowest = h.row;
+                            continue;
+                        }
+                        if (h.row != null && ordering.compare(h.row, nextLowest) > 0) {
+                            nextLowest = h.row;
+                        }
+                    } else {
+                        // there is a running handle, which is not paused and not finished, no need to continue
+                        return false;
+                    }
+                }
+                if (nextLowest == null) {
+                    // This happens if this is the last handle
+                    return false;
+                }
+                lowestToEmit = nextLowest;
+                return true;
+            }
+            return false;
+        }
+
+        public boolean isEmittable(Row row) {
+            return lowestToEmit != null && ( lowestToEmit == row || ordering.compare(row, lowestToEmit) >= 0);
+        }
+
+        public void resumed() {
+            unexhaustedHandles.incrementAndGet();
         }
     }
 }

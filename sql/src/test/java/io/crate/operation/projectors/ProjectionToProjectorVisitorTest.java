@@ -31,6 +31,7 @@ import io.crate.jobs.ExecutionState;
 import io.crate.metadata.*;
 import io.crate.operation.ImplementationSymbolVisitor;
 import io.crate.operation.RowDownstreamHandle;
+import io.crate.operation.RowUpstream;
 import io.crate.operation.aggregation.impl.AggregationImplModule;
 import io.crate.operation.aggregation.impl.AverageAggregation;
 import io.crate.operation.aggregation.impl.CountAggregation;
@@ -289,9 +290,9 @@ public class ProjectionToProjectorVisitorTest extends CrateUnitTest {
         CollectingProjector collectingProjector = new CollectingProjector();
         projector.downstream(collectingProjector);
 
-        RowDownstreamHandle handle1 = projector.registerUpstream(null);
-        RowDownstreamHandle handle2 = projector.registerUpstream(null);
-        RowDownstreamHandle handle3 = projector.registerUpstream(null);
+        RowDownstreamHandle handle1 = projector.registerUpstream(mock(RowUpstream.class));
+        RowDownstreamHandle handle2 = projector.registerUpstream(mock(RowUpstream.class));
+        RowDownstreamHandle handle3 = projector.registerUpstream(mock(RowUpstream.class));
 
         projector.startProjection(mock(ExecutionState.class));
 
@@ -303,11 +304,12 @@ public class ProjectionToProjectorVisitorTest extends CrateUnitTest {
         assertThat(collectingProjector.rows.size(), is(1));
         assertThat((int)collectingProjector.rows.get(0)[0], is(7));
         handle3.finish();
+        handle1.finish();
 
         // 5, 1, 1 is emitted
         assertThat(collectingProjector.rows.size(), is(2));
         assertThat((int)collectingProjector.rows.get(1)[0], is(5));
-        handle1.finish();
+        handle2.finish();
 
         assertThat(collectingProjector.rows.size(), is(3));
         assertThat((int)collectingProjector.rows.get(2)[0], is(0));

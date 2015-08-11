@@ -105,7 +105,7 @@ public class LuceneDocCollector extends Collector implements CrateCollector, Row
     private boolean visitorEnabled = false;
     private AtomicReader currentReader;
     protected int rowCount = 0;
-    private volatile boolean pendingPause = false;
+    private final AtomicBoolean pendingPause = new AtomicBoolean(false);
     private InternalCollectContext internalCollectContext;
     private int currentDocBase = 0;
 
@@ -283,11 +283,12 @@ public class LuceneDocCollector extends Collector implements CrateCollector, Row
 
     @Override
     public void pause() {
-        pendingPause = true;
+        pendingPause.set(true);
     }
 
     @Override
     public void resume(boolean async) {
+        pendingPause.set(false); // set pendingPause to false to avoid race condition
         if (paused.compareAndSet(true, false)) {
             if (!async) {
                 innerCollect();
@@ -309,14 +310,13 @@ public class LuceneDocCollector extends Collector implements CrateCollector, Row
             }
         } else {
             LOGGER.trace("Collector was not paused and so will not resume");
-            pendingPause = false;
         }
     }
 
     public boolean shouldPause() {
-        if (pendingPause) {
+        if (pendingPause.get()) {
             paused.set(true);
-            pendingPause = false;
+            pendingPause.set(false);
             return true;
         }
         return false;

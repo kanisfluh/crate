@@ -21,35 +21,154 @@
 
 package io.crate.operation.projectors;
 
-import com.google.common.collect.ImmutableList;
+import com.carrotsearch.ant.tasks.junit4.dependencies.com.google.common.util.concurrent.SettableFuture;
+import com.carrotsearch.randomizedtesting.annotations.Repeat;
+import io.crate.core.collections.Bucket;
 import io.crate.core.collections.Row;
 import io.crate.core.collections.RowN;
 import io.crate.jobs.ExecutionState;
-import io.crate.operation.RowDownstreamHandle;
+import io.crate.operation.RowUpstream;
 import io.crate.test.integration.CrateUnitTest;
 import io.crate.testing.CollectingProjector;
 import org.junit.Test;
 
 import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
-import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.is;
 import static org.mockito.Mockito.mock;
 
 public class MergeProjectorTest extends CrateUnitTest {
 
-    private Row spare(Object... cells) {
+    private static Row spare(Object... cells) {
         if (cells == null) {
             cells = new Object[]{null};
         }
         return new RowN(cells);
     }
 
+    private static class Upstream implements RowUpstream {
+
+        private final ArrayList<Object[]> rows;
+        private final MergeProjector.MergeProjectorDownstreamHandle downstreamHandle;
+        private boolean paused = false;
+        private boolean finished = false;
+        private final SettableFuture finishedFuture = SettableFuture.create();
+        private boolean threaded = true;
+
+        public Upstream(MergeProjector projector, Object[]... rows) {
+            this.rows = new ArrayList<>();
+            for (int i = 0; i < rows.length; i++) {
+                this.rows.add(rows[i]);
+            }
+            downstreamHandle = (MergeProjector.MergeProjectorDownstreamHandle)projector.registerUpstream(this);
+        }
+
+        @Override
+        public void pause() {
+            if (!paused) {
+                paused = true;
+            }
+        }
+
+        @Override
+        public void resume(boolean threaded) {
+            if (paused) {
+                paused = false;
+                start();
+            }
+        }
+
+        private void doStart() {
+            while (rows.size() > 0) {
+                if (paused) {
+                    return;
+                }
+                Object[] row = rows.remove(0);
+                downstreamHandle.setNextRow(spare(row));
+                if (rows.size() == 0 && threaded) {
+                    finish();
+                }
+            }
+            if (finished && rows.size() == 0) {
+                downstreamHandle.finish();
+                finishedFuture.set(null);
+                return;
+            }
+        }
+
+        public void start() {
+            if (threaded) {
+                Thread thread = new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        doStart();
+                    }
+                });
+                thread.start();
+            } else {
+                doStart();
+            }
+        }
+
+        public void setNextRow(Object[] row) {
+            rows.add(row);
+            start();
+        }
+
+        public void finish() {
+            finished = true;
+            start();
+        }
+    }
+
+    @Test
+    @Repeat(iterations = 1000)
+    public void testSortMergeThreaded() throws Exception {
+        MergeProjector projector = new MergeProjector(
+                new int[]{0},
+                new boolean[]{false},
+                new Boolean[]{null}
+        );
+
+        Upstream upstream1 = new Upstream(projector, new Object[]{1}, new Object[]{3}, new Object[]{4});
+        Upstream upstream2 = new Upstream(projector, new Object[]{2}, new Object[]{3}, new Object[]{5});
+        Upstream upstream3 = new Upstream(projector, new Object[]{1}, new Object[]{3}, new Object[]{3}, new Object[]{4});
+        Upstream upstream4 = new Upstream(projector, new Object[]{1}, new Object[]{3}, new Object[]{4});
+
+        CollectingProjector collectingProjector = new CollectingProjector();
+
+        projector.downstream(collectingProjector);
+        projector.startProjection(mock(ExecutionState.class));
+
+        upstream1.start();
+        upstream2.start();
+        upstream3.start();
+        upstream4.start();
+
+        upstream1.finishedFuture.get(100, TimeUnit.MILLISECONDS);
+        upstream2.finishedFuture.get(100, TimeUnit.MILLISECONDS);
+        upstream3.finishedFuture.get(100, TimeUnit.MILLISECONDS);
+        upstream4.finishedFuture.get(100, TimeUnit.MILLISECONDS);
+
+        Bucket result = collectingProjector.result().get();
+
+        assertThat(result.size(), is(13));
+        assertThat((Integer) collectingProjector.rows.get(0)[0], is(1));
+        assertThat((Integer) collectingProjector.rows.get(1)[0], is(1));
+        assertThat((Integer) collectingProjector.rows.get(2)[0], is(1));
+        assertThat((Integer) collectingProjector.rows.get(3)[0], is(2));
+        assertThat((Integer) collectingProjector.rows.get(4)[0], is(3));
+        assertThat((Integer) collectingProjector.rows.get(5)[0], is(3));
+        assertThat((Integer) collectingProjector.rows.get(6)[0], is(3));
+        assertThat((Integer) collectingProjector.rows.get(7)[0], is(3));
+        assertThat((Integer) collectingProjector.rows.get(8)[0], is(3));
+        assertThat((Integer) collectingProjector.rows.get(9)[0], is(4));
+        assertThat((Integer) collectingProjector.rows.get(10)[0], is(4));
+        assertThat((Integer) collectingProjector.rows.get(11)[0], is(4));
+        assertThat((Integer) collectingProjector.rows.get(12)[0], is(5));
+
+    }
     @Test
     public void testSortMerge() throws Exception {
         MergeProjector projector = new MergeProjector(
@@ -57,84 +176,90 @@ public class MergeProjectorTest extends CrateUnitTest {
                 new boolean[]{false},
                 new Boolean[]{null}
         );
+
+        Upstream upstream1 = new Upstream(projector, new Object[]{1}, new Object[]{3}, new Object[]{4});
+        Upstream upstream2 = new Upstream(projector, new Object[]{2}, new Object[]{3});
+        Upstream upstream3 = new Upstream(projector, new Object[]{1}, new Object[]{3});
+        upstream1.threaded = false;
+        upstream2.threaded = false;
+        upstream3.threaded = false;
+
         CollectingProjector collectingProjector = new CollectingProjector();
-        RowDownstreamHandle handle1 = projector.registerUpstream(null);
-        RowDownstreamHandle handle2 = projector.registerUpstream(null);
-        RowDownstreamHandle handle3 = projector.registerUpstream(null);
 
         projector.downstream(collectingProjector);
         projector.startProjection(mock(ExecutionState.class));
 
-        handle1.setNextRow(spare(1));
-        handle1.setNextRow(spare(3));
-        handle1.setNextRow(spare(4));
+        upstream1.start();
+
         /**
          *      Handle 1        Handle 2        Handle 3
          *      1
-         *      3
-         *      4
+         *      PAUSE
          */
+        assertThat(upstream1.paused, is(true));
         assertThat(collectingProjector.rows.size(), is(0));
 
-        handle2.setNextRow(spare(2));
-        handle2.setNextRow(spare(3));
-
+        upstream2.start();
         /**
          *      Handle 1        Handle 2        Handle 3
          *      1               2
-         *      3               3
-         *      4
+         *      PAUSE           PAUSE
          */
+        assertThat(upstream2.paused, is(true));
 
-        handle3.setNextRow(spare(1));
-        handle3.setNextRow(spare(3));
+        upstream3.start();
         /**
          *      Handle 1        Handle 2        Handle 3
          *      1               2               1
          *      3               3               3
+         *      PAUSE                           PAUSE
          *      4
          *      {1,2,3} are emitted now
          */
 
-        assertThat(collectingProjector.rows.size(), is(6));
+        assertThat(collectingProjector.rows.size(), is(5)); // TODO: maybe manage that it's six
         assertThat((Integer)collectingProjector.rows.get(0)[0], is(1));
         assertThat((Integer)collectingProjector.rows.get(1)[0], is(1));
         assertThat((Integer)collectingProjector.rows.get(2)[0], is(2));
         assertThat((Integer)collectingProjector.rows.get(3)[0], is(3));
         assertThat((Integer)collectingProjector.rows.get(4)[0], is(3));
-        assertThat((Integer)collectingProjector.rows.get(5)[0], is(3));
 
-        handle3.setNextRow(spare(3));
+        assertThat(upstream1.paused, is(true));
+        assertThat(upstream2.paused, is(false));
+        assertThat(upstream3.paused, is(false));
+
+        upstream3.setNextRow(new Object[]{3});
         /**
          *      Handle 1        Handle 2        Handle 3
          *      4                               3
-         *
+         *      PAUSED
          *      3 is emitted immediately
          */
         assertThat(collectingProjector.rows.size(), is(7));
+        assertThat((Integer)collectingProjector.rows.get(5)[0], is(3));
         assertThat((Integer)collectingProjector.rows.get(6)[0], is(3));
 
-        handle3.setNextRow(spare(4));
-        handle3.finish(); // finish upstream, with non empty handle
+        upstream3.setNextRow(new Object[]{4});
+        upstream3.finish(); // finish upstream, with non empty handle
         /**
          *      Handle 1        Handle 2        Handle 3 (finished)
          *      4                               4
          *
          */
 
-        handle2.setNextRow(spare(5));
+        upstream2.setNextRow(new Object[]{5});
         /**
          *      Handle 1        Handle 2        Handle 3 (finished)
          *      4               5               4
          *
          *      4 is emitted
          */
-        assertThat(collectingProjector.rows.size(), is(9));
+        assertThat(collectingProjector.rows.size(), is(8));
         assertThat((Integer)collectingProjector.rows.get(7)[0], is(4));
-        assertThat((Integer)collectingProjector.rows.get(8)[0], is(4));
 
 
-        handle1.finish();
+        upstream1.finish();
+        upstream2.finish();
         /**
          *      Handle 1 (finished)        Handle 2        Handle 3 (finished)
          *                                 5
@@ -142,151 +267,8 @@ public class MergeProjectorTest extends CrateUnitTest {
          *      5 is emitted
          */
         assertThat(collectingProjector.rows.size(), is(10));
-        assertThat((Integer)collectingProjector.rows.get(9)[0], is(5));
-    }
-
-    @Test
-    /**
-     * If an empty upstream is closed it may be possible to
-     * emit on other upstreams.
-     */
-    public void finishEmptyUpstream() {
-        MergeProjector projector = new MergeProjector(
-                new int[]{0},
-                new boolean[]{false},
-                new Boolean[]{null}
-        );
-        CollectingProjector collectingProjector = new CollectingProjector();
-        RowDownstreamHandle handle1 = projector.registerUpstream(null);
-        RowDownstreamHandle handle2 = projector.registerUpstream(null);
-
-        projector.downstream(collectingProjector);
-        projector.startProjection(mock(ExecutionState.class));
-
-        handle1.setNextRow(spare(1));
-        handle2.setNextRow(spare(1));
-        assertThat(collectingProjector.rows.size(), is(2));
-        assertThat((Integer)collectingProjector.rows.get(0)[0], is(1));
-        assertThat((Integer)collectingProjector.rows.get(1)[0], is(1));
-
-        handle2.setNextRow(spare(5));
-        /**
-         *      Handle 1              Handle 2
-         *                            5
-         */
-        assertThat(collectingProjector.rows.size(), is(2));
-
-        handle1.finish();
-        /**
-         *   Handle 1  (finish)    Handle 2
-         *                         5
-         *  5 is emitted
-         */
-        assertThat(collectingProjector.rows.size(), is(3));
-        assertThat((Integer)collectingProjector.rows.get(2)[0], is(5));
-
-    }
-
-    @Test
-    public void finishUpstreamWithUnemittedRows() {
-        MergeProjector projector = new MergeProjector(
-                new int[]{0},
-                new boolean[]{false},
-                new Boolean[]{null}
-        );
-        CollectingProjector collectingProjector = new CollectingProjector();
-        RowDownstreamHandle handle1 = projector.registerUpstream(null);
-        RowDownstreamHandle handle2 = projector.registerUpstream(null);
-        RowDownstreamHandle handle3 = projector.registerUpstream(null);
-        projector.downstream(collectingProjector);
-        projector.startProjection(mock(ExecutionState.class));
-
-        handle1.setNextRow(spare(4));
-        handle3.setNextRow(spare(4));
-        handle3.finish();
-        handle1.finish();
-        /**
-         *      Handle 1 (finished)      Handle 2        Handle 3 (finished)
-         *      4                               4
-         *
-         */
-
-        handle2.setNextRow(spare(5));
-        /**
-         *      Handle 1 (finished)        Handle 2        Handle 3 (finished)
-         *      4                          5               4
-         *
-         *      // everything is emitted
-         */
-        assertThat(collectingProjector.rows.size(), is(3));
-        assertThat((Integer)collectingProjector.rows.get(0)[0], is(4));
-        assertThat((Integer)collectingProjector.rows.get(1)[0], is(4));
-        assertThat((Integer)collectingProjector.rows.get(2)[0], is(5));
-    }
-
-    @Test
-    public void testConcurrentSortMerge() throws Exception {
-        MergeProjector projector = new MergeProjector(
-                new int[]{0},
-                new boolean[]{false},
-                new Boolean[]{null}
-        );
-        CollectingProjector collectingProjector = new CollectingProjector();
-        int numUpstreams = 3;
-        final List<List<Integer>> valuesPerUpstream = new ArrayList<>(numUpstreams);
-        valuesPerUpstream.add(ImmutableList.of(1, 3, 4, 6));
-        valuesPerUpstream.add(ImmutableList.of(2, 3, 5));
-        valuesPerUpstream.add(ImmutableList.of(1, 3, 3, 4));
-
-        final List<Throwable> setNextRowExceptions = new ArrayList<>();
-        final CountDownLatch latch = new CountDownLatch(numUpstreams);
-        final ExecutorService executorService = Executors.newScheduledThreadPool(numUpstreams);
-
-        projector.downstream(collectingProjector);
-        projector.startProjection(mock(ExecutionState.class));
-
-        // register upstreams
-        List<RowDownstreamHandle> downstreamHandles = new ArrayList<>(numUpstreams);
-        for (int i = 0; i < numUpstreams; i++) {
-            downstreamHandles.add(projector.registerUpstream(null));
-        }
-
-        for (int i = 0; i < numUpstreams; i++) {
-            final int upstreamId = i;
-            final RowDownstreamHandle downstreamHandle = downstreamHandles.get(i);
-            executorService.execute(new Runnable() {
-                @Override
-                public void run() {
-                    List<Integer> values = valuesPerUpstream.get(upstreamId);
-                    for (Integer value: values) {
-                        try {
-                            downstreamHandle.setNextRow(spare(value));
-                        } catch (Exception e) {
-                            setNextRowExceptions.add(e);
-                        }
-                    }
-                    downstreamHandle.finish();
-                    latch.countDown();
-                }
-            });
-        }
-        latch.await();
-        executorService.shutdown();
-        assertThat(setNextRowExceptions, empty());
-
-        assertThat(collectingProjector.rows.size(), is(11));
-        assertThat((Integer)collectingProjector.rows.get(0)[0], is(1));
-        assertThat((Integer)collectingProjector.rows.get(1)[0], is(1));
-        assertThat((Integer)collectingProjector.rows.get(2)[0], is(2));
-        assertThat((Integer)collectingProjector.rows.get(3)[0], is(3));
-        assertThat((Integer)collectingProjector.rows.get(4)[0], is(3));
-        assertThat((Integer)collectingProjector.rows.get(5)[0], is(3));
-        assertThat((Integer)collectingProjector.rows.get(6)[0], is(3));
-        assertThat((Integer)collectingProjector.rows.get(7)[0], is(4));
         assertThat((Integer)collectingProjector.rows.get(8)[0], is(4));
         assertThat((Integer)collectingProjector.rows.get(9)[0], is(5));
-        assertThat((Integer)collectingProjector.rows.get(10)[0], is(6));
-
-        executorService.awaitTermination(1, TimeUnit.SECONDS);
     }
+
 }
