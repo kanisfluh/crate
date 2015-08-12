@@ -98,9 +98,7 @@ public class JobCollectContext implements ExecutionSubContext, RowUpstream, Exec
                     public void finish() {
                         rowDownstreamHandle.finish();
                         if (numUpstreams.decrementAndGet() == 0) {
-                            if (!collectPhase.keepContextForFetcher()) {
-                                close();
-                            }
+                            close();
                         }
                     }
 
@@ -232,7 +230,7 @@ public class JobCollectContext implements ExecutionSubContext, RowUpstream, Exec
         throw new UnsupportedOperationException();
     }
 
-    public SharedShardContexts readerAllocation() {
+    public SharedShardContexts sharedShardContexts() {
         return sharedShardContexts;
     }
 }
