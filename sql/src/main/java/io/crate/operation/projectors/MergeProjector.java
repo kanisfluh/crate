@@ -168,27 +168,10 @@ public class MergeProjector implements Projector  {
             if (finished.compareAndSet(false, true)) {
                 LOGGER.error("{} finish", ident);
                 // it's not necessary to check pendingPause, because finish() and pause() will never be called in parallel
-                //if (row != null) { // paused, don't do anything
-                //    // finished was called after resume - this is not a problem we just have to emit and go on :)
-                //    lowestCommon.emitOrPause(row, this);
-                //}
-                //projector.upstreamFinished();
                 if (row == null) {
                     LOGGER.error("{} !paused", ident);
                     lowestCommon.emitOrPause(null, this);
                     projector.upstreamFinished();
-                } else {
-                    //if (lowestCommon.unexhaustedHandles.get() == 0) {
-                    //    LOGGER.error("{} everything exhausted", this.ident);
-                    //    ArrayList<MergeProjectorDownstreamHandle> toResume = lowestCommon.raiseLowest(row, this);
-                    //    lowestCommon.resumeOthers(toResume, this);
-                    //    if (toResume.contains(this)) {
-                    //        this.row = null;
-                    //        LOGGER.error("{} emit after raise on finish", ident);
-                    //        downstreamContext.setNextRow(row);
-                    //        projector.upstreamFinished();
-                    //    }
-                    //}
                 }
             }
         }
@@ -260,7 +243,7 @@ public class MergeProjector implements Projector  {
                     if (h.isFinished()) {
                         unexhaustedHandles.decrementAndGet();
                         upstreamFinished();
-                    } else {
+                    } else { // TODO: maybe finish every handle and then resume the others to avoid concurrent unexhaustedHandles access
                         h.resume();
                     }
                 }
