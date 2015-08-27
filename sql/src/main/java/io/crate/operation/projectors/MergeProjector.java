@@ -75,7 +75,7 @@ public class MergeProjector implements Projector  {
         upstreams.add(upstream);
         remainingUpstreams.incrementAndGet();
         MergeProjectorDownstreamHandle handle = new MergeProjectorDownstreamHandle(this, upstream);
-        LOGGER.error("registerUpstream: {}", handle.ident);
+        LOGGER.error("registerUpstream {} : {}", this, handle.ident);
         downstreamHandles.add(handle);
         lowestCommon.unexhaustedHandles.incrementAndGet();
         return handle;
@@ -158,15 +158,17 @@ public class MergeProjector implements Projector  {
             LOGGER.error("{} pause", ident);
         }
 
+        private AtomicBoolean pendingFinish = new AtomicBoolean(false);
+
         @Override
-        public synchronized void finish() {
+        public void finish() {
             if (finished.compareAndSet(false, true)) {
                 LOGGER.error("{} finish", ident);
                 // it's not necessary to check pendingPause, because finish() and pause() will never be called in parallel
-                if (row == null) {
+                if (row == null && pendingFinish.compareAndSet(false, true)) {
+                    LOGGER.error("{} !paused - upstreamFinished() - unexhausted: {}", ident, lowestCommon.unexhaustedHandles.get());
                     lowestCommon.emitOrPause(null, this);
                     projector.upstreamFinished();
-                    LOGGER.error("{} !paused - upstreamFinished() - unexhausted: {}", ident, lowestCommon.unexhaustedHandles.get());
                 }
             }
         }
@@ -229,14 +231,18 @@ public class MergeProjector implements Projector  {
             return toResume;
         }
 
-        private synchronized void resumeOthers(ArrayList<MergeProjectorDownstreamHandle> toResume, MergeProjectorDownstreamHandle handle) {
+        private void resumeOthers(ArrayList<MergeProjectorDownstreamHandle> toResume, MergeProjectorDownstreamHandle handle) {
             for (MergeProjectorDownstreamHandle h : toResume) {
                 if ( h != handle && h.isFinished()) {
                     LOGGER.trace("{} emit other finished handle {} after raise to: {}", handle.ident, h.ident, lowestToEmit.get(0));
                     emitRow(h.row, h); // TODO: this should happen in another thread
-                    unexhaustedHandles.decrementAndGet();
-                    upstreamFinished();
-                    LOGGER.trace("{} upstreamFinished", h.ident);
+                    if (h.pendingFinish.compareAndSet(false, true)) {
+                        unexhaustedHandles.decrementAndGet();
+                        upstreamFinished();
+                        LOGGER.error("{} upstreamFinished: {}",handle.ident, h.ident);
+                    } else {
+                        LOGGER.error("{} pendingFinished on {} already true ", handle.ident, h.ident);
+                    }
                 }
             }
             for (MergeProjectorDownstreamHandle h : toResume) {
@@ -255,7 +261,7 @@ public class MergeProjector implements Projector  {
 
         }
 
-        private synchronized boolean raiseAndEmitOrPause(@Nullable Row row, MergeProjectorDownstreamHandle handle) {
+        private boolean raiseAndEmitOrPause(@Nullable Row row, MergeProjectorDownstreamHandle handle) {
             ArrayList<MergeProjectorDownstreamHandle> toResume = raiseLowest(row, handle);
             if (toResume.size() == 0) {
                 LOGGER.trace("{} nothing to resume, we are finsihed", handle.ident);
@@ -284,7 +290,7 @@ public class MergeProjector implements Projector  {
                 LOGGER.trace("{} emit directly", handle.ident);
                 ret = emitRow(row, handle);
             } else if (unexhaustedHandles.decrementAndGet() == 0) {
-                LOGGER.trace("{} raise end emit or pause", handle.ident);
+                LOGGER.error("{} raise end emit or pause", handle.ident);
                 ret = raiseAndEmitOrPause(row, handle);
             } else if (row != null) {
                 LOGGER.trace("{} send toPause directly", handle.ident);
