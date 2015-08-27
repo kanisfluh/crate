@@ -294,12 +294,10 @@ public class MergeProjector implements Projector  {
                     handle.row = row;
                 }
             }
-            //synchronized (this) {
                 if (unexhaustedHandles.decrementAndGet() == 0) {
                     LOGGER.trace("{} raise end emit or pause", handle.ident);
                     return raiseAndEmitOrPause(row, handle);
                 }
-            //}
             if (row != null) {
                 LOGGER.trace("{} send toPause directly", handle.ident);
                 handle.pause();
