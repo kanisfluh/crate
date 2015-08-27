@@ -188,36 +188,38 @@ public class MergeProjector implements Projector  {
 
         private ArrayList<MergeProjectorDownstreamHandle> raiseLowest(Row row, MergeProjectorDownstreamHandle handle) {
             ArrayList<MergeProjectorDownstreamHandle> toResume = new ArrayList<>();
-            handle.row = row;
+            //handle.row = row;
             int finished = 0;
             lowestToEmit = handle.row;
             if (!handle.isFinished()) {
                 toResume.add(handle);
             }
             for (MergeProjectorDownstreamHandle h : downstreamHandles) {
-                if (h.row == null) {
-                    //LOGGER.trace("{} - {} h.row == null, isFinished: {}", handle.ident, h.ident, h.isFinished());
-                    assert h.isFinished() : handle.ident+" unfinished handle without row "+h.ident;
-                    finished +=1;
-                    continue;
-                }
-                // if lowestToEmit is null, the handle is finished
-                if (lowestToEmit == null) {
-                    lowestToEmit = h.row;
-                    toResume.add(h);
-                    continue;
-                }
-                if (h == handle) {
-                    continue;
-                }
-                int com = ordering.compare(h.row, lowestToEmit);
-                if (com > 0) {
-                    toResume.clear();
-                    toResume.add(h);
-                    lowestToEmit = h.row;
-                } else if (com == 0) {
-                    toResume.add(h);
-                }
+                //synchronized (h) {
+                    if (h.row == null) {
+                        //LOGGER.trace("{} - {} h.row == null, isFinished: {}", handle.ident, h.ident, h.isFinished());
+                        assert h.isFinished() : handle.ident + " unfinished handle without row " + h.ident;
+                        finished += 1;
+                        continue;
+                    }
+                    // if lowestToEmit is null, the handle is finished
+                    if (lowestToEmit == null) {
+                        lowestToEmit = h.row;
+                        toResume.add(h);
+                        continue;
+                    }
+                    if (h == handle) {
+                        continue;
+                    }
+                    int com = ordering.compare(h.row, lowestToEmit);
+                    if (com > 0) {
+                        toResume.clear();
+                        toResume.add(h);
+                        lowestToEmit = h.row;
+                    } else if (com == 0) {
+                        toResume.add(h);
+                    }
+                //}
             }
 
             assert toResume.size() > 0 || finished == downstreamHandles.size() : "FATAL ERROR";
@@ -250,8 +252,10 @@ public class MergeProjector implements Projector  {
         }
 
         private boolean emitRow(Row row, MergeProjectorDownstreamHandle handle) {
-            LOGGER.trace("{} emit: {}", handle.ident, row.get(0));
-            handle.row = null;
+            LOGGER.trace("{} emit", handle.ident);
+            synchronized (handle) {
+                handle.row = null;
+            }
             return downstreamContext.setNextRow(row);
 
         }
@@ -285,15 +289,20 @@ public class MergeProjector implements Projector  {
                 return emitRow(row, handle);
             }
 
-            synchronized (this) {
+            synchronized (handle) {
+                if (row != null) {
+                    handle.row = row;
+                }
+            }
+            //synchronized (this) {
                 if (unexhaustedHandles.decrementAndGet() == 0) {
                     LOGGER.trace("{} raise end emit or pause", handle.ident);
                     return raiseAndEmitOrPause(row, handle);
-                } else if (row != null) {
-                    LOGGER.trace("{} send toPause directly", handle.ident);
-                    handle.row = row;
-                    handle.pause();
                 }
+            //}
+            if (row != null) {
+                LOGGER.trace("{} send toPause directly", handle.ident);
+                handle.pause();
             }
             LOGGER.trace("{} emitOrPause end", handle.ident);
             return true;
