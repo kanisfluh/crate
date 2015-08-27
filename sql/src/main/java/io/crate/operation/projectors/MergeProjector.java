@@ -278,22 +278,25 @@ public class MergeProjector implements Projector  {
         }
 
         // returns continue
-        public synchronized boolean emitOrPause(@Nullable Row row, MergeProjectorDownstreamHandle handle) {
+        public boolean emitOrPause(@Nullable Row row, MergeProjectorDownstreamHandle handle) {
             LOGGER.trace("{} emitOrPause start", handle.ident);
-            boolean ret = true;
             if (row != null && isEmittable(row)) {
                 LOGGER.trace("{} emit directly", handle.ident);
-                ret = emitRow(row, handle);
-            } else if (unexhaustedHandles.decrementAndGet() == 0) {
-                LOGGER.trace("{} raise end emit or pause", handle.ident);
-                ret = raiseAndEmitOrPause(row, handle);
-            } else if (row != null) {
-                LOGGER.trace("{} send toPause directly", handle.ident);
-                handle.row = row;
-                handle.pause();
+                return emitRow(row, handle);
+            }
+
+            synchronized (this) {
+                if (unexhaustedHandles.decrementAndGet() == 0) {
+                    LOGGER.trace("{} raise end emit or pause", handle.ident);
+                    return raiseAndEmitOrPause(row, handle);
+                } else if (row != null) {
+                    LOGGER.trace("{} send toPause directly", handle.ident);
+                    handle.row = row;
+                    handle.pause();
+                }
             }
             LOGGER.trace("{} emitOrPause end", handle.ident);
-            return ret;
+            return true;
 
         }
 
