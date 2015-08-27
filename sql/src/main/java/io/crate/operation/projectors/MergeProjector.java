@@ -136,7 +136,7 @@ public class MergeProjector implements Projector  {
         }
 
         @Override
-        public synchronized boolean setNextRow(Row row) {
+        public boolean setNextRow(Row row) {
             row = new RowN(row.materialize());
             LOGGER.trace("{} setNextRow: {}", ident, row.get(0));
             if (projector.downstreamAborted.get()) {
@@ -236,7 +236,6 @@ public class MergeProjector implements Projector  {
                     if (h.isFinished()) {
                         // check if finish was called meanwhile
                         if (h.performedFinish.compareAndSet(false, true)) { // TODO: maybe it's possible to remove this check, which would be awesooome
-                            //unexhaustedHandles.decrementAndGet();
                             finishedHandles += 1;
                             upstreamFinished();
                             LOGGER.trace("{} upstreamFinished: {}",handle.ident, h.ident);
@@ -253,9 +252,9 @@ public class MergeProjector implements Projector  {
 
         private boolean emitRow(Row row, MergeProjectorDownstreamHandle handle) {
             LOGGER.trace("{} emit", handle.ident);
-            synchronized (handle) {
+            //synchronized (handle) {
                 handle.row = null;
-            }
+            //}
             return downstreamContext.setNextRow(row);
 
         }
@@ -289,18 +288,20 @@ public class MergeProjector implements Projector  {
                 return emitRow(row, handle);
             }
 
-            synchronized (handle) {
+            //synchronized (handle) {
+            synchronized (this) {
                 if (row != null) {
                     handle.row = row;
                 }
-            }
+                //}
                 if (unexhaustedHandles.decrementAndGet() == 0) {
                     LOGGER.trace("{} raise end emit or pause", handle.ident);
                     return raiseAndEmitOrPause(row, handle);
                 }
-            if (row != null) {
-                LOGGER.trace("{} send toPause directly", handle.ident);
-                handle.pause();
+                if (row != null) {
+                    LOGGER.trace("{} send toPause directly", handle.ident);
+                    handle.pause();
+                }
             }
             LOGGER.trace("{} emitOrPause end", handle.ident);
             return true;
