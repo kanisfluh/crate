@@ -195,31 +195,29 @@ public class MergeProjector implements Projector  {
                 toResume.add(handle);
             }
             for (MergeProjectorDownstreamHandle h : downstreamHandles) {
-                //synchronized (h) {
-                    if (h.row == null) {
-                        //LOGGER.trace("{} - {} h.row == null, isFinished: {}", handle.ident, h.ident, h.isFinished());
-                        assert h.isFinished() : handle.ident + " unfinished handle without row " + h.ident;
-                        finished += 1;
-                        continue;
-                    }
-                    // if lowestToEmit is null, the handle is finished
-                    if (lowestToEmit == null) {
-                        lowestToEmit = h.row;
-                        toResume.add(h);
-                        continue;
-                    }
-                    if (h == handle) {
-                        continue;
-                    }
-                    int com = ordering.compare(h.row, lowestToEmit);
-                    if (com > 0) {
-                        toResume.clear();
-                        toResume.add(h);
-                        lowestToEmit = h.row;
-                    } else if (com == 0) {
-                        toResume.add(h);
-                    }
-                //}
+                if (h.row == null) {
+                    //LOGGER.trace("{} - {} h.row == null, isFinished: {}", handle.ident, h.ident, h.isFinished());
+                    assert h.isFinished() : handle.ident + " unfinished handle without row " + h.ident;
+                    finished += 1;
+                    continue;
+                }
+                // if lowestToEmit is null, the handle is finished
+                if (lowestToEmit == null) {
+                    lowestToEmit = h.row;
+                    toResume.add(h);
+                    continue;
+                }
+                if (h == handle) {
+                    continue;
+                }
+                int com = ordering.compare(h.row, lowestToEmit);
+                if (com > 0) {
+                    toResume.clear();
+                    toResume.add(h);
+                    lowestToEmit = h.row;
+                } else if (com == 0) {
+                    toResume.add(h);
+                }
             }
 
             assert toResume.size() > 0 || finished == downstreamHandles.size() : "FATAL ERROR";
@@ -252,9 +250,7 @@ public class MergeProjector implements Projector  {
 
         private boolean emitRow(Row row, MergeProjectorDownstreamHandle handle) {
             LOGGER.trace("{} emit", handle.ident);
-            //synchronized (handle) {
-                handle.row = null;
-            //}
+            handle.row = null;
             return downstreamContext.setNextRow(row);
 
         }
@@ -288,13 +284,10 @@ public class MergeProjector implements Projector  {
                 return emitRow(row, handle);
             }
 
-            //synchronized (handle) {
             synchronized (this) {
                 if (row != null) {
-                    //handle.row = row;
                     handle.row = new RowN(row.materialize());
                 }
-                //}
                 if (unexhaustedHandles.decrementAndGet() == 0) {
                     LOGGER.trace("{} raise end emit or pause", handle.ident);
                     return raiseAndEmitOrPause(row, handle);
