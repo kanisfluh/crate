@@ -137,7 +137,7 @@ public class MergeProjector implements Projector  {
 
         @Override
         public boolean setNextRow(Row row) {
-            row = new RowN(row.materialize());
+            //row = new RowN(row.materialize());
             LOGGER.trace("{} setNextRow: {}", ident, row.get(0));
             if (projector.downstreamAborted.get()) {
                 return false;
@@ -291,7 +291,8 @@ public class MergeProjector implements Projector  {
             //synchronized (handle) {
             synchronized (this) {
                 if (row != null) {
-                    handle.row = row;
+                    //handle.row = row;
+                    handle.row = new RowN(row.materialize());
                 }
                 //}
                 if (unexhaustedHandles.decrementAndGet() == 0) {
