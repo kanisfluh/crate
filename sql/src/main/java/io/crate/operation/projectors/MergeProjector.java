@@ -75,7 +75,7 @@ public class MergeProjector implements Projector  {
         upstreams.add(upstream);
         remainingUpstreams.incrementAndGet();
         MergeProjectorDownstreamHandle handle = new MergeProjectorDownstreamHandle(this, upstream);
-        LOGGER.error("registerUpstream {} : {}", this, handle.ident);
+        LOGGER.trace("registerUpstream {} : {}", this, handle.ident);
         downstreamHandles.add(handle);
         lowestCommon.unexhaustedHandles.incrementAndGet();
         return handle;
@@ -138,7 +138,7 @@ public class MergeProjector implements Projector  {
         @Override
         public synchronized boolean setNextRow(Row row) {
             row = new RowN(row.materialize());
-            LOGGER.error("{} setNextRow: {}", ident, row.get(0));
+            LOGGER.trace("{} setNextRow: {}", ident, row.get(0));
             if (projector.downstreamAborted.get()) {
                 return false;
             }
@@ -156,17 +156,17 @@ public class MergeProjector implements Projector  {
 
         private void pause() {
             upstream.pause();
-            LOGGER.error("{} pause", ident);
+            LOGGER.trace("{} pause", ident);
         }
 
 
         @Override
         public void finish() {
             if (finished.compareAndSet(false, true)) {
-                LOGGER.error("{} finish", ident);
+                LOGGER.trace("{} finish", ident);
                 // it's not necessary to check pendingPause, because finish() and pause() will never be called in parallel
                 if (row == null && performedFinish.compareAndSet(false, true)) {
-                    LOGGER.error("{} !paused - upstreamFinished() - unexhausted: {}", ident, lowestCommon.unexhaustedHandles.get());
+                    LOGGER.trace("{} !paused - upstreamFinished() - unexhausted: {}", ident, lowestCommon.unexhaustedHandles.get());
                     lowestCommon.emitOrPause(null, this);
                     projector.upstreamFinished();
                 }
@@ -220,11 +220,6 @@ public class MergeProjector implements Projector  {
                 }
             }
 
-            for (MergeProjectorDownstreamHandle h : downstreamHandles) {
-                if (h.row != null) {
-                    assert ordering.compare(h.row, lowestToEmit) <= 0 : "WTF?";
-                }
-            }
             assert toResume.size() > 0 || finished == downstreamHandles.size() : "FATAL ERROR";
             unexhaustedHandles.set(toResume.size());
             LOGGER.trace("unexhausted handles.set: {}", unexhaustedHandles.get());
@@ -238,13 +233,13 @@ public class MergeProjector implements Projector  {
                     emitRow(h.row, h); // TODO: this should happen in another thread
                     if (h.isFinished()) {
                         // check if finish was called meanwhile
-                        if (h.performedFinish.compareAndSet(false, true)) {
+                        if (h.performedFinish.compareAndSet(false, true)) { // TODO: maybe it's possible to remove this check, which would be awesooome
                             //unexhaustedHandles.decrementAndGet();
                             finishedHandles += 1;
                             upstreamFinished();
-                            LOGGER.error("{} upstreamFinished: {}",handle.ident, h.ident);
+                            LOGGER.trace("{} upstreamFinished: {}",handle.ident, h.ident);
                         } else {
-                            LOGGER.error("{} pendingFinished on {} already true ", handle.ident, h.ident);
+                            LOGGER.trace("{} pendingFinished on {} already true ", handle.ident, h.ident);
                         }
                     } else {
                         h.resume();
@@ -264,17 +259,17 @@ public class MergeProjector implements Projector  {
         private boolean raiseAndEmitOrPause(@Nullable Row row, MergeProjectorDownstreamHandle handle) {
             ArrayList<MergeProjectorDownstreamHandle> toResume = raiseLowest(row, handle);
             if (toResume.size() == 0) {
-                LOGGER.error("{} nothing to resume, we are finsihed", handle.ident);
+                LOGGER.trace("{} nothing to resume, we are finsihed", handle.ident);
                 return true;
             }
             resumeOthers(toResume, handle);
             if (toResume.contains(handle)) {
-                LOGGER.error("{} emit after raise to: {}", handle.ident, lowestToEmit.get(0));
+                LOGGER.trace("{} emit after raise to: {}", handle.ident, lowestToEmit.get(0));
                 return emitRow(row, handle);
             } else if(unexhaustedHandles.get() == 0) {
                 // every handle is exhausted after emitting, this may happen if there where paused and finished handles
                 // which has been emitted now.
-                LOGGER.error("{} inner raise and emit or pause", handle.ident);
+                LOGGER.trace("{} inner raise and emit or pause", handle.ident);
                 return raiseAndEmitOrPause(row, handle);
             } else {
                 handle.pause();
@@ -290,7 +285,7 @@ public class MergeProjector implements Projector  {
                 LOGGER.trace("{} emit directly", handle.ident);
                 ret = emitRow(row, handle);
             } else if (unexhaustedHandles.decrementAndGet() == 0) {
-                LOGGER.error("{} raise end emit or pause", handle.ident);
+                LOGGER.trace("{} raise end emit or pause", handle.ident);
                 ret = raiseAndEmitOrPause(row, handle);
             } else if (row != null) {
                 LOGGER.trace("{} send toPause directly", handle.ident);
