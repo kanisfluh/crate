@@ -21,6 +21,7 @@
 
 package io.crate.integrationtests;
 
+import com.carrotsearch.randomizedtesting.annotations.Repeat;
 import io.crate.testing.TestingHelpers;
 import org.junit.Test;
 
@@ -79,6 +80,7 @@ public class CustomSchemaIntegrationTest extends SQLTransportIntegrationTest {
     }
 
     @Test
+    @Repeat(iterations = 100)
     public void testGetCustomSchema() throws Exception {
         execute("create table custom.t (id int) with (number_of_replicas=0)");
         ensureYellow();

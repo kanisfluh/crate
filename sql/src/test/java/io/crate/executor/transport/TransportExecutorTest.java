@@ -21,10 +21,10 @@
 
 package io.crate.executor.transport;
 
+import com.carrotsearch.randomizedtesting.annotations.Repeat;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 import com.google.common.util.concurrent.ListenableFuture;
-import io.crate.Constants;
 import io.crate.analyze.OrderBy;
 import io.crate.analyze.WhereClause;
 import io.crate.core.collections.Bucket;
@@ -40,7 +40,10 @@ import io.crate.metadata.doc.DocTableInfo;
 import io.crate.operation.operator.EqOperator;
 import io.crate.operation.projectors.TopN;
 import io.crate.operation.scalar.DateTruncFunction;
-import io.crate.planner.*;
+import io.crate.planner.IterablePlan;
+import io.crate.planner.Plan;
+import io.crate.planner.Planner;
+import io.crate.planner.RowGranularity;
 import io.crate.planner.node.dml.ESDeleteByQueryNode;
 import io.crate.planner.node.dql.CollectPhase;
 import io.crate.planner.node.dql.ESGetNode;
@@ -230,6 +233,7 @@ public class TransportExecutorTest extends BaseTransportExecutorTest {
     }
 
     @Test
+    @Repeat(iterations = 300)
     public void testQTFTaskOrdered() throws Exception {
         // select id, name from characters order by name, female;
         setup.setUpCharacters();

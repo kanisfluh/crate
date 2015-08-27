@@ -21,6 +21,7 @@
 
 package io.crate.integrationtests;
 
+import com.carrotsearch.randomizedtesting.annotations.Repeat;
 import io.crate.Build;
 import io.crate.Version;
 import io.crate.action.sql.SQLActionException;
@@ -117,6 +118,7 @@ public class TransportSQLActionClassLifecycleTest extends ClassLifecycleIntegrat
     }
 
     @Test
+    //@Repeat(iterations = 1000)
     public void testSelectRaw() throws Exception {
         SQLResponse response = executor.exec("select _raw from characters order by name desc limit 1");
         assertEquals(
@@ -136,6 +138,8 @@ public class TransportSQLActionClassLifecycleTest extends ClassLifecycleIntegrat
     }
 
     @Test
+    @Repeat(iterations = 1000)
+    //@Seed("892DB1930711A21C")
     public void testSelectOrderByNullSortingDESC() throws Exception {
         SQLResponse response = executor.exec("select age from characters order by age desc");
         assertEquals(null, response.rows()[0][0]);
@@ -365,12 +369,13 @@ public class TransportSQLActionClassLifecycleTest extends ClassLifecycleIntegrat
     }
 
     @Test
+    @Repeat(iterations = 1000)
     public void testOrderByNullsFirstAndLast() throws Exception {
         SQLResponse response = executor.exec(
                 "select details['job'] from characters order by details['job'] nulls first limit 1");
         assertNull(response.rows()[0][0]);
 
-        response = executor.exec(
+        /*response = executor.exec(
                 "select details['job'] from characters order by details['job'] desc nulls first limit 1");
         assertNull(response.rows()[0][0]);
 
@@ -385,7 +390,7 @@ public class TransportSQLActionClassLifecycleTest extends ClassLifecycleIntegrat
 
         response = executor.exec(
                 "select distinct details['job'] from characters order by details['job'] desc nulls last");
-        assertNull(response.rows()[((Long) response.rowCount()).intValue() - 1][0]);
+        assertNull(response.rows()[((Long) response.rowCount()).intValue() - 1][0]);*/
     }
 
     @Test

@@ -21,6 +21,7 @@
 
 package io.crate.integrationtests;
 
+import com.carrotsearch.randomizedtesting.annotations.Repeat;
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
 import com.google.common.util.concurrent.ListenableFuture;
@@ -1828,6 +1829,7 @@ public class PartitionedTableIntegrationTest extends SQLTransportIntegrationTest
     }
 
     @Test
+    @Repeat(iterations = 100)
     public void testOrderByDynamicObjectColumn() throws Exception {
         execute("create table event (day timestamp primary key, data object, number int) clustered into 6 shards partitioned by (day)");
         ensureYellow();
