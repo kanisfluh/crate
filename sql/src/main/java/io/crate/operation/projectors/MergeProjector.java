@@ -34,9 +34,7 @@ import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.logging.ESLogger;
 import org.elasticsearch.common.logging.Loggers;
 
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.List;
+import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -137,7 +135,7 @@ public class MergeProjector implements Projector  {
 
         @Override
         public boolean setNextRow(Row row) {
-            //row = new RowN(row.materialize());
+            row = new RowN(row.materialize());
             LOGGER.trace("{} setNextRow: {}", ident, row.get(0));
             if (projector.downstreamAborted.get()) {
                 return false;
@@ -185,9 +183,11 @@ public class MergeProjector implements Projector  {
 
         private final AtomicInteger unexhaustedHandles = new AtomicInteger(0);
         private Row lowestToEmit = null;
+        private Row nextLowest = null;
+        private Set<MergeProjectorDownstreamHandle> toResume = new HashSet<>();
 
-        private ArrayList<MergeProjectorDownstreamHandle> raiseLowest(Row row, MergeProjectorDownstreamHandle handle) {
-            ArrayList<MergeProjectorDownstreamHandle> toResume = new ArrayList<>();
+        private Set<MergeProjectorDownstreamHandle> raiseLowest(Row row, MergeProjectorDownstreamHandle handle) {
+            /*ArrayList<MergeProjectorDownstreamHandle> toResume = new ArrayList<>();
             //handle.row = row;
             int finished = 0;
             lowestToEmit = handle.row;
@@ -218,15 +218,81 @@ public class MergeProjector implements Projector  {
                 } else if (com == 0) {
                     toResume.add(h);
                 }
-            }
+            }*/
 
-            assert toResume.size() > 0 || finished == downstreamHandles.size() : "FATAL ERROR";
+            /*
+            if (nextLowest == null) {
+                int finished = 0;
+                nextLowest = handle.row;
+                if (!handle.isFinished()) {
+                    toResume.clear();
+                    toResume.add(handle);
+                }
+                for (MergeProjectorDownstreamHandle h : downstreamHandles) {
+                    if (h.row == null) {
+                        //LOGGER.trace("{} - {} h.row == null, isFinished: {}", handle.ident, h.ident, h.isFinished());
+                        assert h.isFinished() : handle.ident + " unfinished handle without row " + h.ident;
+                        finished += 1;
+                        continue;
+                    }
+                    // if lowestToEmit is null, the handle is finished
+                    if (nextLowest == null) {
+                        nextLowest = h.row;
+                        toResume.add(h);
+                        continue;
+                    }
+                    if (h == handle) {
+                        continue;
+                    }
+                    int com = ordering.compare(h.row, nextLowest);
+                    if (com > 0) {
+                        toResume.clear();
+                        toResume.add(h);
+                        nextLowest = h.row;
+                    } else if (com == 0) {
+                        toResume.add(h);
+                    }
+                }
+                assert toResume.size() > 0 || finished == downstreamHandles.size() : "FATAL ERROR";
+            }*/
+
+            LOGGER.trace("Upgrading lowestToEmit lowest from {} to {}", lowestToEmit == null ? "NULL" : lowestToEmit.get(0), nextLowest == null ? "NULL" : nextLowest.get(0));
+            lowestToEmit = nextLowest;
+            nextLowest = null;
             unexhaustedHandles.set(toResume.size());
             LOGGER.trace("unexhausted handles.set: {}", unexhaustedHandles.get());
             return toResume;
         }
 
-        private void resumeOthers(ArrayList<MergeProjectorDownstreamHandle> toResume, MergeProjectorDownstreamHandle handle) {
+
+        private void findNextLowest() {
+            int finished = 0;
+            for (MergeProjectorDownstreamHandle h : downstreamHandles) {
+                if (h.row == null) {
+                    //LOGGER.trace("{} - {} h.row == null, isFinished: {}", handle.ident, h.ident, h.isFinished());
+                    //assert h.isFinished() : " unfinished handle without row " + h.ident;
+                    finished += 1;
+                    continue;
+                }
+                // if lowestToEmit is null, the handle is finished
+                if (nextLowest == null) {
+                    nextLowest = h.row;
+                    toResume.add(h);
+                    continue;
+                }
+                int com = ordering.compare(h.row, nextLowest);
+                if (com > 0) {
+                    toResume.clear();
+                    toResume.add(h);
+                    nextLowest = h.row;
+                } else if (com == 0) {
+                    toResume.add(h);
+                }
+            }
+            assert toResume.size() > 0 || finished == downstreamHandles.size() : "FATAL ERROR";
+        }
+
+        private void resumeOthers(Set<MergeProjectorDownstreamHandle> toResume, MergeProjectorDownstreamHandle handle) {
             int finishedHandles = 0;
             for (MergeProjectorDownstreamHandle h : toResume) {
                 if (h != handle) {
@@ -249,14 +315,14 @@ public class MergeProjector implements Projector  {
         }
 
         private boolean emitRow(Row row, MergeProjectorDownstreamHandle handle) {
-            LOGGER.trace("{} emit", handle.ident);
+            LOGGER.trace("{} emit: {}", handle.ident, row.get(0));
             handle.row = null;
             return downstreamContext.setNextRow(row);
 
         }
 
         private boolean raiseAndEmitOrPause(@Nullable Row row, MergeProjectorDownstreamHandle handle) {
-            ArrayList<MergeProjectorDownstreamHandle> toResume = raiseLowest(row, handle);
+            Set<MergeProjectorDownstreamHandle> toResume = raiseLowest(row, handle);
             if (toResume.size() == 0) {
                 LOGGER.trace("{} nothing to resume, we are finsihed", handle.ident);
                 return true;
@@ -264,46 +330,68 @@ public class MergeProjector implements Projector  {
             resumeOthers(toResume, handle);
             if (toResume.contains(handle)) {
                 LOGGER.trace("{} emit after raise to: {}", handle.ident, lowestToEmit.get(0));
-                return emitRow(row, handle);
+                toResume.clear();
+                boolean res = emitRow(row, handle);
+                findNextLowest();
+                return res;
             } else if(unexhaustedHandles.get() == 0) {
                 // every handle is exhausted after emitting, this may happen if there where paused and finished handles
                 // which has been emitted now.
                 LOGGER.trace("{} inner raise and emit or pause", handle.ident);
+                toResume.clear();
+                findNextLowest();
                 return raiseAndEmitOrPause(row, handle);
             } else {
+                toResume.clear();
+                findNextLowest();
                 handle.pause();
                 return true;
             }
         }
 
         // returns continue
-        public boolean emitOrPause(@Nullable Row row, MergeProjectorDownstreamHandle handle) {
+        public synchronized boolean emitOrPause(@Nullable Row row, MergeProjectorDownstreamHandle handle) {
             LOGGER.trace("{} emitOrPause start", handle.ident);
-            if (row != null && isEmittable(row)) {
+            if (row != null && isEmittable(row, handle)) {
                 LOGGER.trace("{} emit directly", handle.ident);
+                LOGGER.trace("{} emitOrPause end", handle.ident);
                 return emitRow(row, handle);
             }
-
-            synchronized (this) {
-                if (row != null) {
-                    handle.row = new RowN(row.materialize());
-                }
-                if (unexhaustedHandles.decrementAndGet() == 0) {
-                    LOGGER.trace("{} raise end emit or pause", handle.ident);
-                    return raiseAndEmitOrPause(row, handle);
-                }
-                if (row != null) {
-                    LOGGER.trace("{} send toPause directly", handle.ident);
-                    handle.pause();
-                }
+            if (row != null) {
+                handle.row = row;
+            }
+            if (unexhaustedHandles.decrementAndGet() == 0) {
+                LOGGER.trace("{} raise end emit or pause", handle.ident);
+                LOGGER.trace("{} emitOrPause end", handle.ident);
+                return raiseAndEmitOrPause(row, handle);
+            }
+            if (row != null) {
+                LOGGER.trace("{} send toPause directly", handle.ident);
+                handle.pause();
             }
             LOGGER.trace("{} emitOrPause end", handle.ident);
             return true;
 
         }
 
-        public boolean isEmittable(Row row) {
-            return lowestToEmit != null && ordering.compare(row, lowestToEmit) >= 0;
+        public boolean isEmittable(Row row, MergeProjectorDownstreamHandle handle) {
+            if (lowestToEmit != null && ordering.compare(row, lowestToEmit) >= 0) {
+                return true;
+            } else if (nextLowest == null) {
+                nextLowest = row;
+                toResume.add(handle);
+            } else {
+                int com = ordering.compare(row, nextLowest);
+                if (com > 0) {
+                    toResume.clear();
+                    toResume.add(handle);
+                    nextLowest = row;
+                } else if (com == 0) {
+                    toResume.add(handle);
+                }
+            }
+            LOGGER.trace("{} nextLowest: {}", handle.ident, row.get(0));
+            return false;
         }
     }
 }
