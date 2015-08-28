@@ -48,9 +48,6 @@ public class MergeProjector implements Projector  {
     private final LowestCommon lowestCommon = new LowestCommon();
     private RowDownstreamHandle downstreamContext;
 
-    private final AtomicInteger comparisons = new AtomicInteger(0);
-
-
     public MergeProjector(int[] orderBy,
                           boolean[] reverseFlags,
                           Boolean[] nullsFirst) {
@@ -88,7 +85,7 @@ public class MergeProjector implements Projector  {
 
     public void upstreamFinished() {
         if (remainingUpstreams.decrementAndGet() <= 0) {
-            LOGGER.trace("comparisons: {}", comparisons.get());
+            //LOGGER.trace("comparisons: {}", comparisons.get());
             if (downstreamContext != null) {
                 downstreamContext.finish();
             }
@@ -186,10 +183,8 @@ public class MergeProjector implements Projector  {
 
         private final AtomicInteger unexhaustedHandles = new AtomicInteger(0);
         private Row lowestToEmit = null;
-        //private Row nextLowest = null;
-        //private Set<MergeProjectorDownstreamHandle> toResume = new HashSet<>();
 
-        private Set<MergeProjectorDownstreamHandle> raiseLowest(Row row, MergeProjectorDownstreamHandle handle) {
+        private synchronized Set<MergeProjectorDownstreamHandle> raiseLowest(Row row, MergeProjectorDownstreamHandle handle) {
 
 
             if (nextLowest.size() > 0) {
@@ -292,7 +287,7 @@ public class MergeProjector implements Projector  {
         }
 
         // returns continue
-        public synchronized boolean emitOrPause(@Nullable Row row, MergeProjectorDownstreamHandle handle) {
+        public boolean emitOrPause(@Nullable Row row, MergeProjectorDownstreamHandle handle) {
             LOGGER.trace("{} emitOrPause start", handle.ident);
             if (row != null && isEmittable(row, handle)) {
                 LOGGER.trace("{} emit directly", handle.ident);
@@ -318,17 +313,13 @@ public class MergeProjector implements Projector  {
 
         private final List<Map.Entry<Row, Set<MergeProjectorDownstreamHandle>>> nextLowest = new ArrayList();
 
-        public boolean isEmittable(Row row, final MergeProjectorDownstreamHandle handle) {
-            if (lowestToEmit != null) {
-                comparisons.incrementAndGet();
-            }
+        public synchronized boolean isEmittable(Row row, final MergeProjectorDownstreamHandle handle) {
             if (lowestToEmit != null && ordering.compare(row, lowestToEmit) >= 0) {
                 return true;
             }
 
             int insertIndex = 0;
             for (Map.Entry<Row, Set<MergeProjectorDownstreamHandle>> entry : nextLowest) {
-                comparisons.incrementAndGet();
                 int com = ordering.compare(row, entry.getKey());
                 if ( com == 0) {
                     entry.getValue().add(handle);
@@ -341,20 +332,6 @@ public class MergeProjector implements Projector  {
             Map.Entry<Row, Set<MergeProjectorDownstreamHandle>> entry = new HashMap.SimpleEntry<Row, Set<MergeProjectorDownstreamHandle>>(row, new HashSet<MergeProjectorDownstreamHandle>(){{add(handle);}});
             nextLowest.add(insertIndex, entry);
 
-            /*if (nextLowest == null) {
-                nextLowest = row;
-                toResume.add(handle);
-            } else {
-                comparisons.incrementAndGet();
-                int com = ordering.compare(row, nextLowest);
-                if (com > 0) {
-                    toResume.clear();
-                    toResume.add(handle);
-                    nextLowest = row;
-                } else if (com == 0) {
-                    toResume.add(handle);
-                }
-            }*/
             LOGGER.trace("{} nextLowest: {}", handle.ident, row.get(0));
             return false;
         }
