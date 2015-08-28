@@ -48,6 +48,8 @@ public class MergeProjector implements Projector  {
     private final LowestCommon lowestCommon = new LowestCommon();
     private RowDownstreamHandle downstreamContext;
 
+    private final AtomicInteger comparisons = new AtomicInteger(0);
+
 
     public MergeProjector(int[] orderBy,
                           boolean[] reverseFlags,
@@ -86,6 +88,7 @@ public class MergeProjector implements Projector  {
 
     public void upstreamFinished() {
         if (remainingUpstreams.decrementAndGet() <= 0) {
+            LOGGER.trace("comparisons: {}", comparisons.get());
             if (downstreamContext != null) {
                 downstreamContext.finish();
             }
@@ -183,88 +186,33 @@ public class MergeProjector implements Projector  {
 
         private final AtomicInteger unexhaustedHandles = new AtomicInteger(0);
         private Row lowestToEmit = null;
-        private Row nextLowest = null;
-        private Set<MergeProjectorDownstreamHandle> toResume = new HashSet<>();
+        //private Row nextLowest = null;
+        //private Set<MergeProjectorDownstreamHandle> toResume = new HashSet<>();
 
         private Set<MergeProjectorDownstreamHandle> raiseLowest(Row row, MergeProjectorDownstreamHandle handle) {
-            /*ArrayList<MergeProjectorDownstreamHandle> toResume = new ArrayList<>();
-            //handle.row = row;
-            int finished = 0;
-            lowestToEmit = handle.row;
-            if (!handle.isFinished()) {
-                toResume.add(handle);
+
+
+            if (nextLowest.size() > 0) {
+                Map.Entry<Row, Set<MergeProjectorDownstreamHandle>> next = nextLowest.remove(0);
+                LOGGER.trace("Upgrading lowestToEmit lowest from {} to {}", lowestToEmit == null ? "NULL" : lowestToEmit.get(0), next.getKey() == null ? "NULL" : next.getKey().get(0));
+                lowestToEmit = next.getKey();
+                unexhaustedHandles.set(next.getValue().size());
+                return next.getValue();
+            } else {
+                LOGGER.trace("Upgrading lowestToEmit lowest from {} to {}", lowestToEmit == null ? "NULL" : lowestToEmit.get(0), "NULL");
+                unexhaustedHandles.set(0);
+                return new HashSet<>(); // TODO: return null
+
             }
-            for (MergeProjectorDownstreamHandle h : downstreamHandles) {
-                if (h.row == null) {
-                    //LOGGER.trace("{} - {} h.row == null, isFinished: {}", handle.ident, h.ident, h.isFinished());
-                    assert h.isFinished() : handle.ident + " unfinished handle without row " + h.ident;
-                    finished += 1;
-                    continue;
-                }
-                // if lowestToEmit is null, the handle is finished
-                if (lowestToEmit == null) {
-                    lowestToEmit = h.row;
-                    toResume.add(h);
-                    continue;
-                }
-                if (h == handle) {
-                    continue;
-                }
-                int com = ordering.compare(h.row, lowestToEmit);
-                if (com > 0) {
-                    toResume.clear();
-                    toResume.add(h);
-                    lowestToEmit = h.row;
-                } else if (com == 0) {
-                    toResume.add(h);
-                }
-            }*/
-
-            /*
-            if (nextLowest == null) {
-                int finished = 0;
-                nextLowest = handle.row;
-                if (!handle.isFinished()) {
-                    toResume.clear();
-                    toResume.add(handle);
-                }
-                for (MergeProjectorDownstreamHandle h : downstreamHandles) {
-                    if (h.row == null) {
-                        //LOGGER.trace("{} - {} h.row == null, isFinished: {}", handle.ident, h.ident, h.isFinished());
-                        assert h.isFinished() : handle.ident + " unfinished handle without row " + h.ident;
-                        finished += 1;
-                        continue;
-                    }
-                    // if lowestToEmit is null, the handle is finished
-                    if (nextLowest == null) {
-                        nextLowest = h.row;
-                        toResume.add(h);
-                        continue;
-                    }
-                    if (h == handle) {
-                        continue;
-                    }
-                    int com = ordering.compare(h.row, nextLowest);
-                    if (com > 0) {
-                        toResume.clear();
-                        toResume.add(h);
-                        nextLowest = h.row;
-                    } else if (com == 0) {
-                        toResume.add(h);
-                    }
-                }
-                assert toResume.size() > 0 || finished == downstreamHandles.size() : "FATAL ERROR";
-            }*/
-
-            LOGGER.trace("Upgrading lowestToEmit lowest from {} to {}", lowestToEmit == null ? "NULL" : lowestToEmit.get(0), nextLowest == null ? "NULL" : nextLowest.get(0));
-            lowestToEmit = nextLowest;
-            nextLowest = null;
-            unexhaustedHandles.set(toResume.size());
-            LOGGER.trace("unexhausted handles.set: {}", unexhaustedHandles.get());
-            return toResume;
+            //lowestToEmit = nextLowest.remove(0);
+            //nextLowest = null;
+            //unexhaustedHandles.set(toResume.size());
+            //LOGGER.trace("unexhausted handles.set: {}", unexhaustedHandles.get());
+            //return toResume;
         }
 
 
+        /*
         private void findNextLowest() {
             int finished = 0;
             for (MergeProjectorDownstreamHandle h : downstreamHandles) {
@@ -280,6 +228,7 @@ public class MergeProjector implements Projector  {
                     toResume.add(h);
                     continue;
                 }
+                comparisons.incrementAndGet();
                 int com = ordering.compare(h.row, nextLowest);
                 if (com > 0) {
                     toResume.clear();
@@ -290,7 +239,7 @@ public class MergeProjector implements Projector  {
                 }
             }
             assert toResume.size() > 0 || finished == downstreamHandles.size() : "FATAL ERROR";
-        }
+        }*/
 
         private void resumeOthers(Set<MergeProjectorDownstreamHandle> toResume, MergeProjectorDownstreamHandle handle) {
             int finishedHandles = 0;
@@ -330,20 +279,13 @@ public class MergeProjector implements Projector  {
             resumeOthers(toResume, handle);
             if (toResume.contains(handle)) {
                 LOGGER.trace("{} emit after raise to: {}", handle.ident, lowestToEmit.get(0));
-                toResume.clear();
-                boolean res = emitRow(row, handle);
-                findNextLowest();
-                return res;
+                return emitRow(row, handle);
             } else if(unexhaustedHandles.get() == 0) {
                 // every handle is exhausted after emitting, this may happen if there where paused and finished handles
                 // which has been emitted now.
                 LOGGER.trace("{} inner raise and emit or pause", handle.ident);
-                toResume.clear();
-                findNextLowest();
                 return raiseAndEmitOrPause(row, handle);
             } else {
-                toResume.clear();
-                findNextLowest();
                 handle.pause();
                 return true;
             }
@@ -374,13 +316,36 @@ public class MergeProjector implements Projector  {
 
         }
 
-        public boolean isEmittable(Row row, MergeProjectorDownstreamHandle handle) {
+        private final List<Map.Entry<Row, Set<MergeProjectorDownstreamHandle>>> nextLowest = new ArrayList();
+
+        public boolean isEmittable(Row row, final MergeProjectorDownstreamHandle handle) {
+            if (lowestToEmit != null) {
+                comparisons.incrementAndGet();
+            }
             if (lowestToEmit != null && ordering.compare(row, lowestToEmit) >= 0) {
                 return true;
-            } else if (nextLowest == null) {
+            }
+
+            int insertIndex = 0;
+            for (Map.Entry<Row, Set<MergeProjectorDownstreamHandle>> entry : nextLowest) {
+                comparisons.incrementAndGet();
+                int com = ordering.compare(row, entry.getKey());
+                if ( com == 0) {
+                    entry.getValue().add(handle);
+                    return false;
+                } else if ( com > 0 ) {
+                    break;
+                }
+                insertIndex += 1;
+            }
+            Map.Entry<Row, Set<MergeProjectorDownstreamHandle>> entry = new HashMap.SimpleEntry<Row, Set<MergeProjectorDownstreamHandle>>(row, new HashSet<MergeProjectorDownstreamHandle>(){{add(handle);}});
+            nextLowest.add(insertIndex, entry);
+
+            /*if (nextLowest == null) {
                 nextLowest = row;
                 toResume.add(handle);
             } else {
+                comparisons.incrementAndGet();
                 int com = ordering.compare(row, nextLowest);
                 if (com > 0) {
                     toResume.clear();
@@ -389,7 +354,7 @@ public class MergeProjector implements Projector  {
                 } else if (com == 0) {
                     toResume.add(handle);
                 }
-            }
+            }*/
             LOGGER.trace("{} nextLowest: {}", handle.ident, row.get(0));
             return false;
         }
